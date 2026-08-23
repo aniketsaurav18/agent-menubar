@@ -1,0 +1,56 @@
+# deps
+node_modules/
+.pnp/
+.pnp.js
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+bun-debug.log*
+*.log
+/tmp/
+logs/
+
+# build / dist
+dist/
+build/
+out/
+.next/
+.cache/
+
+# env
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Python (icon gen)
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Electron / app
+*.asar
+
+# Agent Usage user data (not repo)
+.Agent\ Usage/
+agent-menubar.log
+
+# misc
+coverage/
+.nyc_output/

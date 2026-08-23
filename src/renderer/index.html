@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
+  <title>Agent Usage</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="titlebar">
+      <div class="brand">
+        <svg class="bolt" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+          <path fill="#22d3ee"
+            d="M13.2 1.5 L5 13.5 h6.2 l-1.6 9 L19 10.2 h-6.4 Z"/>
+        </svg>
+        <span>AGENT&nbsp;USAGE</span>
+      </div>
+      <div class="tb-actions">
+        <span id="updAgo" class="ago" title="last updated"></span>
+        <button id="btnRefresh" class="tbtn" title="Refresh (R)">
+          <svg viewBox="0 0 24 24" width="13" height="13"><path fill="currentColor"
+            d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7Z"/></svg>
+        </button>
+        <button id="btnClose" class="tbtn" title="Hide (Esc)">
+          <svg viewBox="0 0 24 24" width="13" height="13"><path fill="currentColor"
+            d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <nav class="agent-nav" role="tablist">
+      <button class="anav active" data-agent="all" title="All agents (A)">
+        <svg viewBox="0 0 24 24" width="13" height="13">
+          <path fill="#a78bfa" d="M13.2 1.5 L5 13.5 h6.2 l-1.6 9 L19 10.2 h-6.4 Z"/>
+        </svg><span>All</span>
+      </button>
+      <button class="anav" data-agent="codex" title="Codex only">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="#fb923c">
+          <ellipse cx="12" cy="5.4" rx="2.7" ry="4.6"/>
+          <ellipse cx="12" cy="5.4" rx="2.7" ry="4.6" transform="rotate(60 12 12)"/>
+          <ellipse cx="12" cy="5.4" rx="2.7" ry="4.6" transform="rotate(120 12 12)"/>
+          <ellipse cx="12" cy="5.4" rx="2.7" ry="4.6" transform="rotate(180 12 12)"/>
+          <ellipse cx="12" cy="5.4" rx="2.7" ry="4.6" transform="rotate(240 12 12)"/>
+          <ellipse cx="12" cy="5.4" rx="2.7" ry="4.6" transform="rotate(300 12 12)"/>
+          <circle cx="12" cy="12" r="2.1" fill="#10141b"/>
+        </svg><span>Codex</span>
+      </button>
+      <button class="anav" data-agent="opencode" title="OpenCode only">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#22d3ee"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 6l6 6-6 6"/><path d="M13 18h6"/>
+        </svg><span>OpenCode</span>
+      </button>
+      <button class="anav" data-agent="claude" title="Claude Code only">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#d97757"
+             stroke-width="2.4" stroke-linecap="round">
+          <path d="M12 3v18"/><path d="M4.2 7.5l15.6 9"/><path d="M19.8 7.5l-15.6 9"/>
+        </svg><span>Claude Code</span>
+      </button>
+    </nav>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="daily">Daily</button>
+      <button class="tab" data-tab="monthly">Monthly</button>
+      <button class="tab" data-tab="alltime">All time</button>
+    </nav>
+
+    <section class="hero">
+      <div class="hero-grid">
+        <div class="hero-cell">
+          <span id="heroCostLbl" class="lbl">SPEND TODAY</span>
+          <div id="heroCost" class="stat-big">—</div>
+        </div>
+        <div class="hero-sep"></div>
+        <div class="hero-cell">
+          <span id="heroToksLbl" class="lbl">TOKENS TODAY</span>
+          <div id="heroToks" class="stat-big">—</div>
+        </div>
+      </div>
+      <div class="hero-foot">
+        <div id="sparkWrap" class="spark spark-wide"></div>
+        <div class="foot-right">
+          <div id="deltaChip" class="chip hidden"></div>
+          <span id="sparkLbl" class="lbl">LAST 7 DAYS</span>
+        </div>
+      </div>
+    </section>
+
+    <main id="view" class="view">
+      <section id="quotaCard" class="quota-card hidden">
+        <div class="split-head">
+          <span class="lbl" id="quotaTitle">CODEX PLAN</span>
+          <span id="quotaState" class="split-pct"></span>
+        </div>
+        <div id="quotaBody"></div>
+      </section>
+
+      <section class="split-card">
+        <div class="split-head">
+          <span id="splitTitle" class="lbl">SPLIT TODAY</span>
+          <span id="splitPct" class="split-pct"></span>
+        </div>
+        <div id="splitBody"></div>
+      </section>
+
+      <div id="viewBody"></div>
+    </main>
+
+    <footer class="foot">
+      <span id="statusDot" class="dot loading"></span>
+      <span id="statusText" class="status-text">starting…</span>
+      <span class="spacer"></span>
+      <span class="hint"><b>R</b> refresh&nbsp;&nbsp;<b>Esc</b> hide</span>
+    </footer>
+  </div>
+
+  <div id="tooltip" class="tooltip hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

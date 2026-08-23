@@ -1,0 +1,16 @@
+{
+  "name": "agent-menubar",
+  "productName": "Agent Usage",
+  "version": "0.1.0",
+  "description": "Menubar tray showing LLM token usage per agent harness (codex, opencode, claude) via ccusage",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron . --no-sandbox",
+    "icons": "python3 scripts/gen-icons.py"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "42"
+  }
+}
