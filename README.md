@@ -4,6 +4,12 @@ A lightweight GNOME top-bar tray that shows LLM token usage and spend per agent 
 
 Built for developers running multiple AI harnesses who want an at-a-glance cost/token meter.
 
+<p align="center">
+  <img src="screenshots/01-all.png" width="32%" alt="All agents — Daily overview" />
+  <img src="screenshots/02-graph-bars.png" width="32%" alt="Daily chart and history bars (scrolled)" />
+  <img src="screenshots/03-codex.png" width="32%" alt="Codex — plan quota and model breakdown" />
+</p>
+
 ## Features
 
 - Tray icon + live context menu (today / month / all-time, per-harness `◆ Codex` / `● OpenCode` / `✳ Claude Code`)
