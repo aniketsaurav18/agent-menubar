@@ -24,7 +24,7 @@ Built for developers running multiple AI harnesses who want an at-a-glance cost/
 ## Install
 
 ```bash
-git clone https://github.com/<you>/agent-menubar.git
+git clone https://github.com/aniketsaurav18/agent-menubar.git
 cd agent-menubar
 ./install.sh
 ```
