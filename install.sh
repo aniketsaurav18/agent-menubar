@@ -38,7 +38,7 @@ Options:
 What it does (user-local):
   1. Checks node, python3, package manager
   2. Installs npm deps (electron v42) + regenerates assets/icon.png
-  3. Ensures ccusage is available (prompts to install if missing)
+  3. Bundles ccusage as an app dependency (no global install needed)
   4. Creates ~/.local/share/applications/$APP_ID.desktop
   5. Creates ~/.config/autostart/$APP_ID.desktop (unless --no-autostart)
   6. Optionally creates ~/.config/systemd/user/$APP_ID.service
@@ -231,27 +231,15 @@ else
 fi
 
 # ── 5. ccusage ────────────────────────────────────────────────────────────
-if command -v ccusage &>/dev/null; then
-  ok "ccusage found ($(command -v ccusage))"
-elif [[ -n "${CCUSAGE_BIN:-}" && -x "$CCUSAGE_BIN" ]]; then
+# ccusage ships as a bundled npm dependency (installed above); nothing global
+# is required. CCUSAGE_BIN can still override with an external binary.
+if [[ -n "${CCUSAGE_BIN:-}" && -x "$CCUSAGE_BIN" ]]; then
   ok "ccusage found via CCUSAGE_BIN=$CCUSAGE_BIN"
+elif [[ -f "$REPO_DIR/node_modules/ccusage/src/cli.js" ]]; then
+  ok "ccusage bundled (node_modules/ccusage)"
 else
-  warn "ccusage not found on PATH."
-  echo "      The tray shells out to ccusage for usage data."
-  echo "      Install with one of:"
-  echo "        bun add -g ccusage   (or npm i -g ccusage)"
-  echo "        bunx ccusage --help  (try without global install)"
-  echo "      Or set CCUSAGE_BIN=/path/to/ccusage before launching."
-  # non-fatal: don't exit, just warn
-  if [[ -t 0 ]]; then
-    read -rp "Install ccusage globally now via $PM? [y/N] " ans
-    if [[ "$ans" =~ ^[Yy] ]]; then
-      if [[ "$PM" == "bun" ]]; then bun add -g ccusage || npm i -g ccusage || true
-      else npm i -g ccusage || bun add -g ccusage || true
-      fi
-      command -v ccusage &>/dev/null && ok "ccusage installed" || warn "ccusage install may need PATH update"
-    fi
-  fi
+  warn "bundled ccusage missing — did 'bun install'/'npm install' run?"
+  echo "      Re-run this installer, or set CCUSAGE_BIN=/path/to/ccusage."
 fi
 
 # ── 6. desktop entry ──────────────────────────────────────────────────────

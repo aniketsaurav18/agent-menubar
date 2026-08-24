@@ -23,7 +23,8 @@ Built for developers running multiple AI harnesses who want an at-a-glance cost/
 - **Node.js ≥ 18** (`curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt install nodejs`)
 - **bun** or **npm** (bun preferred)
 - **Python 3 + Pillow** for icons (`sudo apt install python3 python3-pip && pip install Pillow` — installer handles it)
-- **ccusage** (`bun add -g ccusage` or `npm i -g ccusage`, or set `CCUSAGE_BIN`)
+
+> **ccusage is bundled** as a regular npm dependency and runs on Electron's own Node runtime (`ELECTRON_RUN_AS_NODE`) — no global install, PATH entry, or system Node needed. Set `CCUSAGE_BIN` to override with an external binary.
 
 > Electron pinned to **v42** — v43+ broke GNOME SNI tray (electron#52674).
 

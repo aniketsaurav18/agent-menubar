@@ -32,24 +32,118 @@ const pad = (n) => String(n).padStart(2, '0');
 const localDateStr = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const localMonthStr = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
 
+function executableExists(bin) {
+  try {
+    fs.accessSync(bin, fs.constants.X_OK);
+    return fs.statSync(bin).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// Bare names must be resolved against PATH ourselves: execFile's lookup uses
+// the inherited env, and under GNOME autostart nvm/volta/etc are never loaded.
+function whichOnPath(name) {
+  for (const dir of (process.env.PATH || '').split(':')) {
+    if (!dir) continue;
+    const full = path.join(dir, name);
+    if (executableExists(full)) return full;
+  }
+  return null;
+}
+
+// Autostart sessions don't source ~/.nvm/nvm.sh, so nvm-installed ccusage is
+// invisible on PATH after a reboot. Scan known version managers explicitly.
+function versionManagerCandidates(home) {
+  const out = [];
+  const scans = [
+    path.join(home, '.nvm', 'versions', 'node'),
+    path.join(home, '.volta', 'tools', 'image', 'node'),
+    path.join(home, '.local', 'share', 'mise', 'installs', 'node'),
+  ];
+  const verKey = (v) => v.split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
+  for (const base of scans) {
+    try {
+      const versions = fs
+        .readdirSync(base)
+        .sort((a, b) => {
+          const ka = verKey(a);
+          const kb = verKey(b);
+          for (let i = 0; i < Math.max(ka.length, kb.length); i++) {
+            const d = (ka[i] || 0) - (kb[i] || 0);
+            if (d) return -d; // newest first
+          }
+          return 0;
+        });
+      for (const v of versions) out.push(path.join(base, v, 'bin', 'ccusage'));
+    } catch {
+      /* manager not installed */
+    }
+  }
+  return out;
+}
+
+// Preferred source: the ccusage npm package bundled with this app
+// (package.json dependency). Resolved via its package.json `bin` field so
+// version layout changes don't break us.
+function findBundledCcusage() {
+  try {
+    const pkgPath = require.resolve('ccusage/package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    const rel = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.ccusage;
+    if (!rel) return null;
+    const cli = path.join(path.dirname(pkgPath), rel);
+    return executableExists(cli) ? cli : null;
+  } catch {
+    return null;
+  }
+}
+
 function findCcusage() {
+  const home = process.env.HOME || '';
   const candidates = [
     process.env.CCUSAGE_BIN,
-    'ccusage',
-    `${process.env.HOME}/.bun/bin/ccusage`,
-    `${process.env.HOME}/.npm-global/bin/ccusage`,
+    `${home}/.bun/bin/ccusage`,
+    `${home}/.npm-global/bin/ccusage`,
+    ...versionManagerCandidates(home),
   ].filter(Boolean);
-  return candidates[0];
+
+  for (const c of candidates) {
+    if (c.includes('/') ? executableExists(c) : false) return c;
+  }
+
+  // Last resort: whatever is on PATH right now (works for interactive runs).
+  return whichOnPath('ccusage') || 'ccusage';
+}
+
+function resolveCcusage() {
+  const bundled = !process.env.CCUSAGE_BIN && findBundledCcusage();
+  if (bundled) return { bundled: true, cli: bundled };
+  return { bundled: false, bin: findCcusage() };
 }
 
 async function runCcusage(args) {
-  const bin = ccusageBin ||= findCcusage();
-  const { stdout } = await execFileP(bin, args, {
+  // Bundled CLI is spawned through Electron's own Node runtime
+  // (ELECTRON_RUN_AS_NODE), so no system Node.js is required at all.
+  const target = ccusageBin ||= resolveCcusage();
+  const opts = {
     maxBuffer: 128 * 1024 * 1024,
     timeout: 120_000,
     encoding: 'utf8',
-  });
-  return JSON.parse(stdout);
+  };
+  try {
+    const { stdout } = target.bundled
+      ? await execFileP(process.execPath, [target.cli, ...args], {
+          ...opts,
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        })
+      : await execFileP(target.bin, args, opts);
+    return JSON.parse(stdout);
+  } catch (err) {
+    // Resolver went stale (dep removed/upgraded): re-resolve next tick.
+    if (err?.code === 'ENOENT') ccusageBin = null;
+    throw err;
+  }
 }
 
 /* --------------------------- codex plan quota ---------------------------- */
@@ -266,6 +360,7 @@ async function refresh(broadcast = true) {
     await refreshQuota();
     snapshot = buildSnapshot(parseRows(dailyJson, 'daily'), parseRows(monthlyJson, 'monthly'));
     lastError = null;
+    saveSnapshotCache(snapshot);
   } catch (err) {
     lastError = String(err?.message || err);
     console.error('[ccusage] refresh failed:', lastError);
@@ -277,6 +372,35 @@ async function refresh(broadcast = true) {
     }
   }
   return snapshot;
+}
+
+/* ------------------------- snapshot disk cache ---------------------------- */
+// ccusage rescans every session log on each run, which is slow right after a
+// cold boot. Persist the last good snapshot so boot shows data instantly and
+// revalidates in the background (stale-while-revalidate).
+
+function snapshotCachePath() {
+  return path.join(app.getPath('userData'), 'snapshot-cache.json');
+}
+
+function loadSnapshotCache() {
+  try {
+    const snap = JSON.parse(fs.readFileSync(snapshotCachePath(), 'utf8'));
+    if (!snap || typeof snap !== 'object' || !Number.isFinite(snap.updatedAt)) return null;
+    if (!Array.isArray(snap.daily) || !Array.isArray(snap.monthly)) return null;
+    return snap;
+  } catch {
+    return null;
+  }
+}
+
+function saveSnapshotCache(snap) {
+  if (!snap) return;
+  try {
+    fs.writeFileSync(snapshotCachePath(), JSON.stringify(snap));
+  } catch (err) {
+    console.error('[cache] write failed:', err?.message || err);
+  }
 }
 
 /* ---------------------------------- tray ---------------------------------- */
@@ -449,7 +573,11 @@ if (!app.requestSingleInstanceLock()) {
 
     createWindow();
     createTray();
-    refresh(false);
+    // Hydrate from the last good snapshot so tray + dashboard render instantly,
+    // then revalidate in the background (first real refresh broadcasts).
+    snapshot = loadSnapshotCache();
+    updateTray();
+    refresh(true);
     setInterval(() => refresh(true), REFRESH_MS);
 
     ipcMain.handle('usage:get', () => snapshot);
