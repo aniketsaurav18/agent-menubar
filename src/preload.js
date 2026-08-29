@@ -10,4 +10,6 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('usage:updated', listener);
     return () => ipcRenderer.removeListener('usage:updated', listener);
   },
+  getPricing: () => ipcRenderer.invoke('pricing:get'),
+  refreshPricing: () => ipcRenderer.invoke('pricing:refresh'),
 });

@@ -17,6 +17,11 @@ const WANTED = ['codex', 'opencode', 'claude'];
 const META_LABEL = { codex: 'Codex', opencode: 'OpenCode', claude: 'Claude Code' };
 const TRAY_SYM = { codex: '◆', opencode: '●', claude: '✳' };
 const REFRESH_MS = 60_000;
+const PRICING_TTL_MS = 24 * 60 * 60 * 1000;
+const PRICING_URLS = [
+  'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json',
+  'https://models.dev/api.json',
+];
 
 let tray = null;
 let win = null;
@@ -26,6 +31,7 @@ let lastError = null;
 let snapshot = null;
 let ccusageBin = null;
 let codexQuota = null;
+let pricingCacheRefreshing = false;
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const pad = (n) => String(n).padStart(2, '0');
@@ -122,9 +128,10 @@ function resolveCcusage() {
   return { bundled: false, bin: findCcusage() };
 }
 
-async function runCcusage(args) {
+async function runCcusage(args, { offline = false } = {}) {
   // Bundled CLI is spawned through Electron's own Node runtime
   // (ELECTRON_RUN_AS_NODE), so no system Node.js is required at all.
+  const finalArgs = offline ? [...args, '--offline'] : args;
   const target = ccusageBin ||= resolveCcusage();
   const opts = {
     maxBuffer: 128 * 1024 * 1024,
@@ -133,11 +140,11 @@ async function runCcusage(args) {
   };
   try {
     const { stdout } = target.bundled
-      ? await execFileP(process.execPath, [target.cli, ...args], {
+      ? await execFileP(process.execPath, [target.cli, ...finalArgs], {
           ...opts,
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
         })
-      : await execFileP(target.bin, args, opts);
+      : await execFileP(target.bin, finalArgs, opts);
     return JSON.parse(stdout);
   } catch (err) {
     // Resolver went stale (dep removed/upgraded): re-resolve next tick.
@@ -343,6 +350,7 @@ function buildSnapshot(rawDaily, rawMonthly) {
     monthly: rawMonthly.slice(-12),
     allTime,
     codexQuota,
+    pricingCache: loadPricingCache(),
     error: lastError,
   };
 }
@@ -352,10 +360,24 @@ async function refresh(broadcast = true) {
   refreshing = true;
   updateTray();
   try {
+    const offline = isPricingCacheFresh();
+    if (offline) console.log('[pricing] using cached pricing (--offline)');
+    else console.log('[pricing] cache stale/missing — fetching live pricing');
+
     const [dailyJson, monthlyJson] = await Promise.all([
-      runCcusage(['daily', '--json', '--by-agent', '--breakdown']),
-      runCcusage(['monthly', '--json', '--by-agent', '--breakdown']),
+      runCcusage(['daily', '--json', '--by-agent', '--breakdown'], { offline }),
+      runCcusage(['monthly', '--json', '--by-agent', '--breakdown'], { offline }),
     ]);
+    // On a successful live fetch, mark pricing cache fresh so next 24h uses --offline.
+    // On offline runs we keep the existing timestamp; staleness is checked lazily.
+    if (!offline) {
+      try {
+        // Persist the fact that pricing was just fetched live via ccusage
+        touchPricingCache();
+      } catch {}
+      // Also refresh the on-disk pricing JSON in background (best-effort, never blocks UI)
+      refreshPricingCacheInBackground();
+    }
     // Quota is best-effort: never block or fail usage data on it.
     await refreshQuota();
     snapshot = buildSnapshot(parseRows(dailyJson, 'daily'), parseRows(monthlyJson, 'monthly'));
@@ -400,6 +422,119 @@ function saveSnapshotCache(snap) {
     fs.writeFileSync(snapshotCachePath(), JSON.stringify(snap));
   } catch (err) {
     console.error('[cache] write failed:', err?.message || err);
+  }
+}
+
+/* ------------------------- pricing disk cache ---------------------------- */
+// ccusage fetches model pricing from LiteLLM / models.dev on every invocation
+// (6s network fetch). Cache the fact that pricing was fetched and the raw
+// pricing JSON itself to disk for 24h, then use `--offline` (embedded + cached
+// snapshot) for all intermediate refreshes. On startup and every 24h we do a
+// single live fetch to refresh the snapshot.
+
+function pricingCachePath() {
+  return path.join(app.getPath('userData'), 'pricing-cache.json');
+}
+
+function loadPricingCache() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(pricingCachePath(), 'utf8'));
+    if (!raw || typeof raw !== 'object' || !Number.isFinite(raw.fetchedAt)) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+function isPricingCacheFresh() {
+  const c = loadPricingCache();
+  if (!c) return false;
+  return Date.now() - c.fetchedAt < PRICING_TTL_MS;
+}
+
+function touchPricingCache() {
+  const now = Date.now();
+  let prev = null;
+  try {
+    prev = loadPricingCache();
+  } catch {}
+  const payload = {
+    fetchedAt: now,
+    ttlMs: PRICING_TTL_MS,
+    sources: PRICING_URLS,
+    // Preserve previously fetched raw data if present; avoid losing it on a pure timestamp bump
+    liteLLM: prev?.liteLLM ?? null,
+    modelsDev: prev?.modelsDev ?? null,
+    errors: prev?.errors ?? [],
+  };
+  const tmp = pricingCachePath() + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(payload));
+  fs.renameSync(tmp, pricingCachePath());
+  console.log(`[pricing] marked fresh at ${new Date(now).toISOString()}`);
+}
+
+async function fetchAndCachePricing() {
+  if (pricingCacheRefreshing) return null;
+  pricingCacheRefreshing = true;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 15_000);
+  try {
+    console.log('[pricing] fetching live pricing from LiteLLM / models.dev ...');
+    const fetches = PRICING_URLS.map((url) =>
+      fetch(url, {
+        signal: ac.signal,
+        headers: { 'User-Agent': 'agent-menubar/pricing-cache', Accept: 'application/json' },
+      }).then(async (res) => {
+        if (!res.ok) throw new Error(`${url} HTTP ${res.status}`);
+        return res.json();
+      }),
+    );
+    const results = await Promise.allSettled(fetches);
+    const succeeded = results.filter((r) => r.status === 'fulfilled');
+    if (succeeded.length === 0) {
+      const reasons = results.map((r) => (r.status === 'rejected' ? String(r.reason).slice(0, 120) : '')).join(' | ');
+      throw new Error(`all pricing fetches failed: ${reasons}`);
+    }
+    const payload = {
+      fetchedAt: Date.now(),
+      ttlMs: PRICING_TTL_MS,
+      sources: PRICING_URLS,
+      liteLLM: results[0].status === 'fulfilled' ? results[0].value : null,
+      modelsDev: results[1].status === 'fulfilled' ? results[1].value : null,
+      errors: results
+        .filter((r) => r.status === 'rejected')
+        .map((r) => String(r.reason).slice(0, 160)),
+    };
+    const tmp = pricingCachePath() + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(payload));
+    fs.renameSync(tmp, pricingCachePath());
+    console.log(`[pricing] saved ${succeeded.length}/2 sources, ${fs.statSync(pricingCachePath()).size} bytes`);
+    return payload;
+  } catch (err) {
+    console.warn('[pricing] fetch failed:', err?.message || err);
+    return null;
+  } finally {
+    clearTimeout(timer);
+    pricingCacheRefreshing = false;
+  }
+}
+
+function refreshPricingCacheInBackground() {
+  // Fire-and-forget: never block UI/refresh, just update the on-disk JSON for future `--offline` runs
+  fetchAndCachePricing().catch(() => {});
+}
+
+async function ensurePricingCacheAtStartup() {
+  if (isPricingCacheFresh()) {
+    console.log('[pricing] cache fresh at startup, using --offline for next 24h');
+    return;
+  }
+  console.log('[pricing] cache stale/missing at startup — fetching pricing ...');
+  const res = await fetchAndCachePricing();
+  if (!res) {
+    // Even if fetch fails, touch the cache with a short backoff so we don't hammer on every boot
+    // But if we have no cache at all, let the first ccusage run be online (it will touch on success)
+    console.log('[pricing] startup fetch failed — first ccusage run will be online');
   }
 }
 
@@ -565,7 +700,7 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     // Wayland: prefer native wayland when available, fall back gracefully.
     if (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland') {
       // already appended before ready normally, but harmless
@@ -577,13 +712,16 @@ if (!app.requestSingleInstanceLock()) {
     // then revalidate in the background (first real refresh broadcasts).
     snapshot = loadSnapshotCache();
     updateTray();
-    refresh(true);
-    setInterval(() => refresh(true), REFRESH_MS);
 
     ipcMain.handle('usage:get', () => snapshot);
     ipcMain.handle('app:refresh', async () => {
       await refresh(true);
       return snapshot;
+    });
+    ipcMain.handle('pricing:get', () => loadPricingCache());
+    ipcMain.handle('pricing:refresh', async () => {
+      const res = await fetchAndCachePricing();
+      return res || loadPricingCache();
     });
     ipcMain.on('win:hide', () => win?.hide());
     ipcMain.on('win:show', () => {
@@ -591,6 +729,24 @@ if (!app.requestSingleInstanceLock()) {
       win?.show();
       win?.focus();
     });
+
+    // Pricing: fetch at startup or after 24h, save to disk, and use cached pricing via --offline.
+    // Await startup ensure so first data refresh can use --offline if we just warmed the cache.
+    try {
+      await ensurePricingCacheAtStartup();
+    } catch (e) {
+      console.warn('[pricing] startup ensure failed:', e?.message || e);
+    }
+    refresh(true);
+    setInterval(() => refresh(true), REFRESH_MS);
+    // Safety net: if the machine stays up >24h, ensurePricing logic inside refresh() will
+    // flip the next refresh to online. Also re-check hourly in case refresh() is idle.
+    setInterval(() => {
+      if (!isPricingCacheFresh()) {
+        console.log('[pricing] TTL expired — background refresh');
+        refreshPricingCacheInBackground();
+      }
+    }, 60 * 60 * 1000);
   });
 
   app.on('before-quit', () => (quitting = true));
