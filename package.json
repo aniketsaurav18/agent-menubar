@@ -11,7 +11,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "ccusage": "^20.0.20"
+    "ccusage": "^20.0.26"
   },
   "devDependencies": {
     "electron": "42"

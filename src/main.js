@@ -17,11 +17,10 @@ const WANTED = ['codex', 'opencode', 'claude'];
 const META_LABEL = { codex: 'Codex', opencode: 'OpenCode', claude: 'Claude Code' };
 const TRAY_SYM = { codex: '◆', opencode: '●', claude: '✳' };
 const REFRESH_MS = 60_000;
-const PRICING_TTL_MS = 24 * 60 * 60 * 1000;
-const PRICING_URLS = [
-  'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json',
-  'https://models.dev/api.json',
-];
+const PRICING_TTL_MS = 60 * 60 * 1000; // 1h: ccusage --offline uses embedded pricing
+// which predates newly launched models (they show $0). Re-fetch live pricing
+// from ccusage hourly so new models pick up costs promptly. Live fetch is
+// ~20s vs ~0.4s offline, hence the TTL instead of going live every minute.
 
 let tray = null;
 let win = null;
@@ -31,7 +30,6 @@ let lastError = null;
 let snapshot = null;
 let ccusageBin = null;
 let codexQuota = null;
-let pricingCacheRefreshing = false;
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const pad = (n) => String(n).padStart(2, '0');
@@ -355,28 +353,42 @@ function buildSnapshot(rawDaily, rawMonthly) {
   };
 }
 
-async function refresh(broadcast = true) {
+async function refresh(broadcast = true, { live = false } = {}) {
   if (refreshing) return snapshot;
   refreshing = true;
   updateTray();
   try {
-    const offline = isPricingCacheFresh();
+    // Offline is fast (~0.4s) but uses ccusage's embedded pricing, which lacks
+    // models launched after the ccusage release (they report $0). Go live
+    // (~20s) whenever the pricing TTL expired or a live refresh was requested.
+    let offline = !live && isPricingCacheFresh();
     if (offline) console.log('[pricing] using cached pricing (--offline)');
-    else console.log('[pricing] cache stale/missing — fetching live pricing');
+    else console.log('[pricing] fetching live pricing (online ccusage run)');
 
-    const [dailyJson, monthlyJson] = await Promise.all([
-      runCcusage(['daily', '--json', '--by-agent', '--breakdown'], { offline }),
-      runCcusage(['monthly', '--json', '--by-agent', '--breakdown'], { offline }),
-    ]);
-    // On a successful live fetch, mark pricing cache fresh so next 24h uses --offline.
-    // On offline runs we keep the existing timestamp; staleness is checked lazily.
+    let dailyJson;
+    let monthlyJson;
+    try {
+      [dailyJson, monthlyJson] = await Promise.all([
+        runCcusage(['daily', '--json', '--by-agent', '--breakdown'], { offline }),
+        runCcusage(['monthly', '--json', '--by-agent', '--breakdown'], { offline }),
+      ]);
+    } catch (err) {
+      if (offline) throw err;
+      // Live run failed (e.g. no network): fall back to cached pricing so the
+      // UI still updates instead of showing a stale error.
+      console.error('[ccusage] live refresh failed, falling back to offline:', err?.message || err);
+      [dailyJson, monthlyJson] = await Promise.all([
+        runCcusage(['daily', '--json', '--by-agent', '--breakdown'], { offline: true }),
+        runCcusage(['monthly', '--json', '--by-agent', '--breakdown'], { offline: true }),
+      ]);
+      offline = true; // don't touch the pricing timestamp after a fallback
+    }
     if (!offline) {
+      // Live ccusage run succeeded: its freshly fetched pricing is what
+      // produced these costs — mark the TTL from now.
       try {
-        // Persist the fact that pricing was just fetched live via ccusage
         touchPricingCache();
       } catch {}
-      // Also refresh the on-disk pricing JSON in background (best-effort, never blocks UI)
-      refreshPricingCacheInBackground();
     }
     // Quota is best-effort: never block or fail usage data on it.
     await refreshQuota();
@@ -426,11 +438,15 @@ function saveSnapshotCache(snap) {
 }
 
 /* ------------------------- pricing disk cache ---------------------------- */
-// ccusage fetches model pricing from LiteLLM / models.dev on every invocation
-// (6s network fetch). Cache the fact that pricing was fetched and the raw
-// pricing JSON itself to disk for 24h, then use `--offline` (embedded + cached
-// snapshot) for all intermediate refreshes. On startup and every 24h we do a
-// single live fetch to refresh the snapshot.
+// ccusage fetches model pricing over the network on every online invocation
+// (~20s for both reports vs ~0.4s offline). This timestamp records the last
+// successful ONLINE ccusage run; while it is fresh we pass `--offline` for
+// fast refreshes. Once it expires the next refresh goes live again so newly
+// launched models pick up costs promptly (offline embedded pricing predates
+// them and reports $0).
+// NOTE: this file intentionally stores only a timestamp. An earlier revision
+// downloaded LiteLLM/models.dev JSON here, but ccusage never reads that file,
+// so it had no effect on calculated costs and only kept the app offline longer.
 
 function pricingCachePath() {
   return path.join(app.getPath('userData'), 'pricing-cache.json');
@@ -454,88 +470,19 @@ function isPricingCacheFresh() {
 
 function touchPricingCache() {
   const now = Date.now();
-  let prev = null;
-  try {
-    prev = loadPricingCache();
-  } catch {}
-  const payload = {
-    fetchedAt: now,
-    ttlMs: PRICING_TTL_MS,
-    sources: PRICING_URLS,
-    // Preserve previously fetched raw data if present; avoid losing it on a pure timestamp bump
-    liteLLM: prev?.liteLLM ?? null,
-    modelsDev: prev?.modelsDev ?? null,
-    errors: prev?.errors ?? [],
-  };
+  const payload = { fetchedAt: now, ttlMs: PRICING_TTL_MS };
   const tmp = pricingCachePath() + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(payload));
   fs.renameSync(tmp, pricingCachePath());
   console.log(`[pricing] marked fresh at ${new Date(now).toISOString()}`);
 }
 
-async function fetchAndCachePricing() {
-  if (pricingCacheRefreshing) return null;
-  pricingCacheRefreshing = true;
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 15_000);
-  try {
-    console.log('[pricing] fetching live pricing from LiteLLM / models.dev ...');
-    const fetches = PRICING_URLS.map((url) =>
-      fetch(url, {
-        signal: ac.signal,
-        headers: { 'User-Agent': 'agent-menubar/pricing-cache', Accept: 'application/json' },
-      }).then(async (res) => {
-        if (!res.ok) throw new Error(`${url} HTTP ${res.status}`);
-        return res.json();
-      }),
-    );
-    const results = await Promise.allSettled(fetches);
-    const succeeded = results.filter((r) => r.status === 'fulfilled');
-    if (succeeded.length === 0) {
-      const reasons = results.map((r) => (r.status === 'rejected' ? String(r.reason).slice(0, 120) : '')).join(' | ');
-      throw new Error(`all pricing fetches failed: ${reasons}`);
-    }
-    const payload = {
-      fetchedAt: Date.now(),
-      ttlMs: PRICING_TTL_MS,
-      sources: PRICING_URLS,
-      liteLLM: results[0].status === 'fulfilled' ? results[0].value : null,
-      modelsDev: results[1].status === 'fulfilled' ? results[1].value : null,
-      errors: results
-        .filter((r) => r.status === 'rejected')
-        .map((r) => String(r.reason).slice(0, 160)),
-    };
-    const tmp = pricingCachePath() + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(payload));
-    fs.renameSync(tmp, pricingCachePath());
-    console.log(`[pricing] saved ${succeeded.length}/2 sources, ${fs.statSync(pricingCachePath()).size} bytes`);
-    return payload;
-  } catch (err) {
-    console.warn('[pricing] fetch failed:', err?.message || err);
-    return null;
-  } finally {
-    clearTimeout(timer);
-    pricingCacheRefreshing = false;
-  }
-}
-
-function refreshPricingCacheInBackground() {
-  // Fire-and-forget: never block UI/refresh, just update the on-disk JSON for future `--offline` runs
-  fetchAndCachePricing().catch(() => {});
-}
-
-async function ensurePricingCacheAtStartup() {
+function ensurePricingCacheAtStartup() {
   if (isPricingCacheFresh()) {
-    console.log('[pricing] cache fresh at startup, using --offline for next 24h');
+    console.log('[pricing] cache fresh at startup, using --offline until TTL expires');
     return;
   }
-  console.log('[pricing] cache stale/missing at startup — fetching pricing ...');
-  const res = await fetchAndCachePricing();
-  if (!res) {
-    // Even if fetch fails, touch the cache with a short backoff so we don't hammer on every boot
-    // But if we have no cache at all, let the first ccusage run be online (it will touch on success)
-    console.log('[pricing] startup fetch failed — first ccusage run will be online');
-  }
+  console.log('[pricing] cache stale/missing at startup — first refresh will run live');
 }
 
 /* ---------------------------------- tray ---------------------------------- */
@@ -720,8 +667,10 @@ if (!app.requestSingleInstanceLock()) {
     });
     ipcMain.handle('pricing:get', () => loadPricingCache());
     ipcMain.handle('pricing:refresh', async () => {
-      const res = await fetchAndCachePricing();
-      return res || loadPricingCache();
+      // Force a live ccusage run so new-model prices update immediately.
+      // Falls back to cached pricing internally if the network is down.
+      await refresh(true, { live: true });
+      return loadPricingCache();
     });
     ipcMain.on('win:hide', () => win?.hide());
     ipcMain.on('win:show', () => {
@@ -730,21 +679,17 @@ if (!app.requestSingleInstanceLock()) {
       win?.focus();
     });
 
-    // Pricing: fetch at startup or after 24h, save to disk, and use cached pricing via --offline.
-    // Await startup ensure so first data refresh can use --offline if we just warmed the cache.
-    try {
-      await ensurePricingCacheAtStartup();
-    } catch (e) {
-      console.warn('[pricing] startup ensure failed:', e?.message || e);
-    }
+    // Pricing: fast --offline refreshes while the TTL is fresh; the first
+    // refresh after TTL expiry runs live (online ccusage) and re-marks it.
+    ensurePricingCacheAtStartup();
     refresh(true);
     setInterval(() => refresh(true), REFRESH_MS);
-    // Safety net: if the machine stays up >24h, ensurePricing logic inside refresh() will
-    // flip the next refresh to online. Also re-check hourly in case refresh() is idle.
+    // Safety net: the 60s interval already flips to a live run once the TTL
+    // expires, but re-check hourly in case refreshes were failing while idle.
     setInterval(() => {
       if (!isPricingCacheFresh()) {
-        console.log('[pricing] TTL expired — background refresh');
-        refreshPricingCacheInBackground();
+        console.log('[pricing] TTL expired — background live refresh');
+        refresh(true, { live: true });
       }
     }, 60 * 60 * 1000);
   });
