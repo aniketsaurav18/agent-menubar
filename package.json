@@ -6,7 +6,7 @@
   "main": "src/main.js",
   "type": "commonjs",
   "scripts": {
-    "start": "electron . --no-sandbox",
+    "start": "electron . --no-sandbox --ozone-platform-hint=x11",
     "icons": "python3 scripts/gen-icons.py"
   },
   "license": "MIT",

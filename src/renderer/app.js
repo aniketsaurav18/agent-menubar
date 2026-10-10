@@ -104,6 +104,8 @@ const fmtMoney = (v, opts = {}) =>
     ...opts,
   });
 
+const fmtModelCost = (m) => m.missingPricing ? 'pricing unavailable' : fmtMoney(m.cost);
+
 function fmtTok(n) {
   n = n || 0;
   if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
@@ -343,7 +345,7 @@ function renderSplit() {
       el.splitBody.innerHTML = `<div class="models">${models
         .map(
           (m) =>
-            `<span class="model-chip"><b>${m.name}</b>&nbsp; ${fmtMoney(m.cost)} · ${fmtTok(m.tokens)}</span>`,
+            `<span class="model-chip"><b>${m.name}</b>&nbsp; ${fmtModelCost(m)} · ${fmtTok(m.tokens)}</span>`,
         )
         .join('')}</div>`;
     } else if (p && (p.tokens > 0 || p.cost > 0)) {
@@ -553,7 +555,7 @@ function allTimeView() {
           ? `<div class="models">${models
               .map(
                 (m) =>
-                  `<span class="model-chip"><b>${m.name}</b>&nbsp; ${fmtTok(m.tokens)}</span>`,
+                  `<span class="model-chip"><b>${m.name}</b>&nbsp; ${m.missingPricing ? 'pricing unavailable · ' : ''}${fmtTok(m.tokens)}</span>`,
               )
               .join('')}</div>`
           : ''
@@ -616,6 +618,12 @@ function renderStatus() {
   } else if (!snap) {
     el.statusDot.className = 'dot loading';
     el.statusText.textContent = 'loading usage…';
+  } else if (snap.pricingStatus?.unpricedModels?.length) {
+    el.statusDot.className = 'dot error';
+    el.statusText.textContent = 'partial cost · some model prices unavailable';
+  } else if (snap.pricingStatus?.offline) {
+    el.statusDot.className = 'dot loading';
+    el.statusText.textContent = 'offline pricing · auto-refresh 60s';
   } else {
     el.statusDot.className = 'dot live';
     el.statusText.textContent = 'live · auto-refresh 60s';

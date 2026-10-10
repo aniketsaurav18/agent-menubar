@@ -17,6 +17,10 @@ Built for developers running multiple AI harnesses who want an at-a-glance cost/
 - Codex quota window (remaining % + reset timer) via `~/.codex/auth.json`
 - Auto-refresh 60s, `R` to refresh, `Esc` to hide
 
+Daily and monthly reports share one ccusage load. If a refresh loses a previously known model price, the app retains the last usage snapshot and shows an error until pricing recovers. Models with no available price are labeled **pricing unavailable**, and their totals are marked as partial. Offline pricing comes from ccusage's embedded catalog; `pricing-cache.json` stores status metadata, not model prices.
+
+Run the pricing regression checks with `node --test test/pricing.test.js`.
+
 ## Requirements
 
 - **Linux + GNOME** with AppIndicator (`sudo apt install gnome-shell-extension-appindicator` if tray missing)

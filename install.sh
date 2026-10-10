@@ -245,8 +245,8 @@ fi
 # ── 6. desktop entry ──────────────────────────────────────────────────────
 mkdir -p "$DESKTOP_DIR"
 # Electron needs --no-sandbox unless chrome-sandbox is setuid-root (see README)
-# Use XWayland backend for tray (native Wayland can't position popup nor register SNI reliably)
-EXEC_LINE="\"$ELECTRON_BIN\" \"$REPO_DIR\" --no-sandbox"
+# Force XWayland backend for tray (native Wayland silently fails SNI registration)
+EXEC_LINE="\"$ELECTRON_BIN\" \"$REPO_DIR\" --no-sandbox --ozone-platform-hint=x11"
 # wrapper to ensure correct env when launched from GNOME
 cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
@@ -287,10 +287,11 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=$ELECTRON_BIN $REPO_DIR --no-sandbox
+ExecStart=$ELECTRON_BIN $REPO_DIR --no-sandbox --ozone-platform-hint=x11
 Restart=on-failure
 RestartSec=3
 Environment=DISPLAY=:0
+Environment=ELECTRON_OZONE_PLATFORM_HINT=x11
 # Keep Wayland/X11 vars from user session (systemd --user imports them)
 # If tray doesn't appear, ensure graphical-session.target is active:
 #   systemctl --user status graphical-session.target

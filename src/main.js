@@ -5,11 +5,14 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 
 // Dev-environment friendly flag: the SUID helper is misconfigured for local
-// installs on this machine. NOTE: we deliberately do NOT force native Wayland
-// ozone — Electron's StatusNotifierItem tray only registers reliably through
-// the default X11/XWayland backend, and XWayland also lets us position the
-// popup next to the tray (native Wayland toplevels cannot be positioned).
+// installs on this machine. NOTE: force X11/XWayland ozone — Electron's
+// StatusNotifierItem tray only registers reliably through X11/XWayland, and
+// XWayland also lets us position the popup next to the tray (native Wayland
+// toplevels cannot be positioned). Electron 42 defaults to native Wayland
+// when WAYLAND_DISPLAY is set, which silently creates a Tray that never
+// appears on the StatusNotifierWatcher — hence this must stay forced.
 app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('ozone-platform-hint', 'x11');
 
 const execFileP = promisify(execFile);
 
@@ -17,13 +20,10 @@ const WANTED = ['codex', 'opencode', 'claude'];
 const META_LABEL = { codex: 'Codex', opencode: 'OpenCode', claude: 'Claude Code' };
 const TRAY_SYM = { codex: '◆', opencode: '●', claude: '✳' };
 const REFRESH_MS = 60_000;
-// Live (online) ccusage runs fetch current model pricing (~20s for both
-// reports vs ~0.4s with --offline). We always run live: --offline uses
-// ccusage's embedded pricing, which lacks newly launched models (they report
-// $0), and every refresh rebuilds full history — so an offline run would
-// overwrite correct costs with $0s. On network failure we fall back to
-// --offline so the UI still updates. PRICING_TTL_MS is kept only as
-// informational metadata in the status file, not as a gate.
+// --offline uses ccusage's embedded prices, not prices from the last live run.
+// Even online runs can silently fall back to embedded prices on fetch failure.
+// Keep missingPricing flags and reject reports that lose previously known
+// prices. PRICING_TTL_MS is informational metadata, not a refresh gate.
 const PRICING_TTL_MS = 15 * 60 * 1000;
 
 let tray = null;
@@ -141,12 +141,13 @@ async function runCcusage(args, { offline = false } = {}) {
     encoding: 'utf8',
   };
   try {
-    const { stdout } = target.bundled
+    const { stdout, stderr } = target.bundled
       ? await execFileP(process.execPath, [target.cli, ...finalArgs], {
           ...opts,
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
         })
       : await execFileP(target.bin, finalArgs, opts);
+    if (stderr?.trim()) console.warn('[ccusage]', stderr.trim());
     return JSON.parse(stdout);
   } catch (err) {
     // Resolver went stale (dep removed/upgraded): re-resolve next tick.
@@ -237,6 +238,7 @@ function parseBreakdown(entry) {
   const models = (entry?.modelBreakdowns || []).map((m) => ({
     name: String(m?.modelName ?? 'unknown'),
     cost: num(m?.totalCost ?? m?.costUSD ?? m?.cost),
+    missingPricing: m?.missingPricing === true,
     // ccusage model entries carry no totalTokens/totalCost — only per-kind
     // token counts — so fall back to summing them (else every model shows 0 tok).
     tokens:
@@ -330,9 +332,10 @@ function buildSnapshot(rawDaily, rawMonthly) {
       agg.cacheReadTokens += part.cacheReadTokens || 0;
       agg.cacheCreationTokens += part.cacheCreationTokens || 0;
       for (const m of part.models) {
-        const cur = allTime.modelsByAgent[name].get(m.name) || { cost: 0, tokens: 0 };
+        const cur = allTime.modelsByAgent[name].get(m.name) || { cost: 0, tokens: 0, missingPricing: false };
         cur.cost += m.cost;
         cur.tokens += m.tokens;
+        cur.missingPricing ||= m.missingPricing;
         allTime.modelsByAgent[name].set(m.name, cur);
       }
     }
@@ -361,47 +364,64 @@ function buildSnapshot(rawDaily, rawMonthly) {
   };
 }
 
+function missingModelPrices(snap) {
+  return WANTED.flatMap((agent) =>
+    (snap?.allTime?.modelsByAgent?.[agent] || [])
+      .filter((m) => m.missingPricing)
+      .map((m) => ({ agent, name: m.name })),
+  );
+}
+
+function assertPricingNotLost(next, previous) {
+  const lost = missingModelPrices(next).filter(({ agent, name }) =>
+    previous?.allTime?.modelsByAgent?.[agent]?.some((m) =>
+      m.name === name && m.cost > 0 && !m.missingPricing,
+    ),
+  );
+  if (lost.length) {
+    throw new Error(`Pricing unavailable for ${lost.map((m) => `${m.agent}/${m.name}`).join(', ')}; keeping last usage`);
+  }
+}
+
 async function refresh(broadcast = true) {
   if (refreshing) return snapshot;
   refreshing = true;
   updateTray();
   try {
-    // Always run live so new-model costs are correct (see PRICING_TTL_MS note
-    // above). Fall back to cached pricing only if the live run fails.
+    // One load shares pricing and session data across both report sections.
     let offline = false;
     console.log('[pricing] fetching live pricing (online ccusage run)');
 
-    let dailyJson;
-    let monthlyJson;
+    let report;
+    const args = ['--sections', 'daily,monthly', '--json', '--by-agent', '--breakdown'];
     try {
-      [dailyJson, monthlyJson] = await Promise.all([
-        runCcusage(['daily', '--json', '--by-agent', '--breakdown'], { offline }),
-        runCcusage(['monthly', '--json', '--by-agent', '--breakdown'], { offline }),
-      ]);
+      report = await runCcusage(args);
     } catch (err) {
-      // Live run failed (e.g. no network): fall back to cached pricing so the
-      // UI still updates instead of showing a stale error.
+      // Embedded pricing is usable only if it does not lose known prices.
       console.error('[ccusage] live refresh failed, falling back to offline:', err?.message || err);
-      [dailyJson, monthlyJson] = await Promise.all([
-        runCcusage(['daily', '--json', '--by-agent', '--breakdown'], { offline: true }),
-        runCcusage(['monthly', '--json', '--by-agent', '--breakdown'], { offline: true }),
-      ]);
-      offline = true; // don't touch the pricing timestamp after a fallback
+      report = await runCcusage(args, { offline: true });
+      offline = true;
     }
-    if (!offline) {
-      // Live ccusage run succeeded: its freshly fetched pricing is what
-      // produced these costs — mark the TTL from now.
+    if (!Array.isArray(report?.daily) || !Array.isArray(report?.monthly)) {
+      throw new Error('ccusage did not return daily and monthly report sections; keeping last usage');
+    }
+    const next = buildSnapshot(parseRows(report, 'daily'), parseRows(report, 'monthly'));
+    assertPricingNotLost(next, snapshot);
+    next.pricingStatus = { offline, unpricedModels: missingModelPrices(next) };
+    if (!offline && !next.pricingStatus.unpricedModels.length) {
+      // This records a complete online report, not a persisted pricing table.
       try {
         touchPricingCache();
       } catch {}
     }
     // Quota is best-effort: never block or fail usage data on it.
     await refreshQuota();
-    snapshot = buildSnapshot(parseRows(dailyJson, 'daily'), parseRows(monthlyJson, 'monthly'));
     lastError = null;
+    snapshot = { ...next, codexQuota, pricingCache: loadPricingCache(), error: null };
     saveSnapshotCache(snapshot);
   } catch (err) {
     lastError = String(err?.message || err);
+    if (snapshot) snapshot = { ...snapshot, error: lastError };
     console.error('[ccusage] refresh failed:', lastError);
   } finally {
     refreshing = false;
@@ -443,8 +463,8 @@ function saveSnapshotCache(snap) {
 }
 
 /* ------------------------- pricing status file --------------------------- */
-// Records the last successful ONLINE ccusage run. Displayed via `pricing:get`
-// and included in snapshots for observability; it no longer gates anything.
+// Records the last complete online report; contains no actual model prices.
+// ccusage may use embedded prices even online, so this is not proof of a fetch.
 
 function pricingCachePath() {
   return path.join(app.getPath('userData'), 'pricing-cache.json');
@@ -632,10 +652,8 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(async () => {
-    // Wayland: prefer native wayland when available, fall back gracefully.
-    if (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland') {
-      // already appended before ready normally, but harmless
-    }
+    // Ozone backend is forced to x11 above (before ready); nothing to do here.
+    // Do NOT switch to native Wayland: Tray SNI registration silently fails there.
 
     createWindow();
     createTray();
@@ -652,7 +670,7 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle('pricing:get', () => loadPricingCache());
     ipcMain.handle('pricing:refresh', async () => {
       // Every refresh is already live; this just triggers one on demand.
-      // Falls back to cached pricing internally if the network is down.
+      // Falls back to embedded pricing if usable, otherwise keeps last usage.
       await refresh(true);
       return loadPricingCache();
     });
