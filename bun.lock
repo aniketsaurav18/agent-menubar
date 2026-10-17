@@ -7,7 +7,7 @@
         "ccusage": "^20.0.26",
       },
       "devDependencies": {
-        "electron": "42",
+        "electron": "42.9.3",
       },
     },
   },

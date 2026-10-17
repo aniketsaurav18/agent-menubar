@@ -1,8 +1,9 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+const { createTrayMonitor } = require('./tray-health');
 
 // Dev-environment friendly flag: the SUID helper is misconfigured for local
 // installs on this machine. NOTE: force X11/XWayland ozone — Electron's
@@ -12,7 +13,8 @@ const { promisify } = require('node:util');
 // when WAYLAND_DISPLAY is set, which silently creates a Tray that never
 // appears on the StatusNotifierWatcher — hence this must stay forced.
 app.commandLine.appendSwitch('no-sandbox');
-app.commandLine.appendSwitch('ozone-platform-hint', 'x11');
+// The old ozone-platform-hint switch is ignored by current Electron.
+app.commandLine.appendSwitch('ozone-platform', 'x11');
 
 const execFileP = promisify(execFile);
 
@@ -34,6 +36,7 @@ let lastError = null;
 let snapshot = null;
 let ccusageBin = null;
 let codexQuota = null;
+let trayMonitor = null;
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const pad = (n) => String(n).padStart(2, '0');
@@ -590,11 +593,26 @@ function updateTray() {
 
 function createTray() {
   const icon = nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'icon.png'));
+  if (icon.isEmpty()) throw new Error('Tray icon assets/icon.png is missing or invalid');
+  if (quitting) return;
   tray = new Tray(icon);
   tray.setToolTip('Agent Usage');
   updateTray();
   // Some compositors deliver activate/click instead of opening the menu.
   tray.on('click', toggleWindow);
+}
+
+function recoverTray() {
+  if (!tray) return createTray();
+  // Replacing a Linux Tray in-process can leave Chromium's old D-Bus object
+  // exported without interfaces. A new process gives the host a fresh bus
+  // connection and removes the stale registration when the old one exits.
+  quitting = true;
+  trayMonitor?.stop();
+  const supervised = process.env.AGENT_MENUBAR_SUPERVISED === '1';
+  if (!supervised) app.relaunch();
+  fs.writeSync(2, '[tray] confirmed tray failure; restarting app for a fresh D-Bus connection\n');
+  app.exit(supervised ? 1 : 0);
 }
 
 /* --------------------------------- window --------------------------------- */
@@ -656,7 +674,8 @@ if (!app.requestSingleInstanceLock()) {
     // Do NOT switch to native Wayland: Tray SNI registration silently fails there.
 
     createWindow();
-    createTray();
+    trayMonitor = createTrayMonitor({ recreate: recoverTray });
+    trayMonitor.start();
     // Hydrate from the last good snapshot so tray + dashboard render instantly,
     // then revalidate in the background (first real refresh broadcasts).
     snapshot = loadSnapshotCache();
@@ -687,7 +706,13 @@ if (!app.requestSingleInstanceLock()) {
     setInterval(() => refresh(true), REFRESH_MS);
   });
 
-  app.on('before-quit', () => (quitting = true));
+  app.on('before-quit', () => {
+    quitting = true;
+    trayMonitor?.stop();
+  });
+  // Let before-quit run before Electron tears down its native tray objects.
+  process.once('SIGTERM', () => app.quit());
+  process.once('SIGINT', () => app.quit());
   app.on('window-all-closed', () => {
     // stay alive in tray
   });

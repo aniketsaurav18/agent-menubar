@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const mainRequire = require('node:module').createRequire(path.resolve(__dirname, '../src/main.js'));
 
 // Exercise the real main-process refresh without starting Electron or touching
 // the user's snapshot/auth files. Only process, quota, and disk boundaries are stubbed.
@@ -12,7 +13,7 @@ function harness(reports = []) {
   let pricingTouches = 0;
   const app = { commandLine: { appendSwitch() {} }, requestSingleInstanceLock: () => false, quit() {} };
   const context = vm.createContext({
-    require: (name) => name === 'electron' ? { app } : require(name),
+    require: (name) => name === 'electron' ? { app } : mainRequire(name),
     __dirname: path.resolve(__dirname, '../src'),
     process,
     console: { log() {}, warn() {}, error() {} },

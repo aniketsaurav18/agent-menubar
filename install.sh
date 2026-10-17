@@ -31,7 +31,7 @@ Options:
   --system        System-wide install (/opt/$APP_ID, /usr/share/applications)
                   Requires sudo. Default is user-local (~/.local).
   --no-autostart  Skip autostart entry
-  --systemd       Also install & enable systemd --user service (autostart via systemd)
+  --systemd       Use a systemd --user service instead of desktop autostart
   --uninstall     Remove desktop entries / autostart / systemd service
   --help          Show this help
 
@@ -124,6 +124,12 @@ if [[ "$UNINSTALL" == true ]]; then
   uninstall
 fi
 
+# Preserve an existing service installation when reinstalling without flags.
+if [[ "$SYSTEM" == false && "$NO_AUTOSTART" == false && -f "$SERVICE_FILE" ]] &&
+   systemctl --user is-enabled --quiet "$APP_ID.service" 2>/dev/null; then
+  WITH_SYSTEMD=true
+fi
+
 echo ""
 echo -e "${CYAN}━━━ $APP_NAME installer ━━━${NC}"
 echo "Repo: $REPO_DIR"
@@ -143,6 +149,7 @@ need_cmd() {
 }
 
 need_cmd python3 "install python3 (sudo apt install python3 python3-pip / sudo dnf install python3)"
+need_cmd busctl "install systemd (used to verify and recover the tray registration)"
 
 # node
 if ! command -v node &>/dev/null; then
@@ -246,7 +253,7 @@ fi
 mkdir -p "$DESKTOP_DIR"
 # Electron needs --no-sandbox unless chrome-sandbox is setuid-root (see README)
 # Force XWayland backend for tray (native Wayland silently fails SNI registration)
-EXEC_LINE="\"$ELECTRON_BIN\" \"$REPO_DIR\" --no-sandbox --ozone-platform-hint=x11"
+EXEC_LINE="\"$ELECTRON_BIN\" \"$REPO_DIR\" --no-sandbox --ozone-platform=x11"
 # wrapper to ensure correct env when launched from GNOME
 cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
@@ -268,7 +275,11 @@ ok "Desktop entry → $DESKTOP_FILE"
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 
 # ── 7. autostart ──────────────────────────────────────────────────────────
-if [[ "$NO_AUTOSTART" == false ]]; then
+if [[ "$WITH_SYSTEMD" == true ]]; then
+  # Only one login startup mechanism; the single-instance lock is a backstop.
+  rm -f "$AUTOSTART_FILE"
+  info "Using systemd autostart instead of a desktop autostart entry"
+elif [[ "$NO_AUTOSTART" == false ]]; then
   mkdir -p "$AUTOSTART_DIR"
   cp -f "$DESKTOP_FILE" "$AUTOSTART_FILE"
   ok "Autostart → $AUTOSTART_FILE"
@@ -287,11 +298,12 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=$ELECTRON_BIN $REPO_DIR --no-sandbox --ozone-platform-hint=x11
+ExecStart="$REPO_DIR/node_modules/electron/dist/electron" "$REPO_DIR" --no-sandbox --ozone-platform=x11
 Restart=on-failure
 RestartSec=3
-Environment=DISPLAY=:0
-Environment=ELECTRON_OZONE_PLATFORM_HINT=x11
+KillMode=mixed
+TimeoutStopSec=10
+Environment=AGENT_MENUBAR_SUPERVISED=1
 # Keep Wayland/X11 vars from user session (systemd --user imports them)
 # If tray doesn't appear, ensure graphical-session.target is active:
 #   systemctl --user status graphical-session.target
@@ -319,7 +331,7 @@ if [[ "$SYSTEM" == false ]]; then
   mkdir -p "$SHIM_DIR"
   cat > "$SHIM_FILE" <<EOF
 #!/usr/bin/env bash
-exec "$ELECTRON_BIN" "$REPO_DIR" --no-sandbox "\$@"
+exec "$ELECTRON_BIN" "$REPO_DIR" --no-sandbox --ozone-platform=x11 "\$@"
 EOF
   chmod +x "$SHIM_FILE"
   ok "CLI shim → $SHIM_FILE"
@@ -373,7 +385,7 @@ if [[ ! "$ans" =~ ^[Nn] ]]; then
       WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
       DISPLAY="${DISPLAY:-:1}" \
       DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" \
-      nohup "$ELECTRON_BIN" "$REPO_DIR" --no-sandbox --remote-debugging-port=9222 \
+      nohup "$ELECTRON_BIN" "$REPO_DIR" --no-sandbox --ozone-platform=x11 --remote-debugging-port=9222 \
       > /tmp/opencode/agent-menubar.log 2>&1 < /dev/null &
     sleep 2
     if pgrep -f "electron.*$REPO_DIR" &>/dev/null; then

@@ -6,7 +6,8 @@
   "main": "src/main.js",
   "type": "commonjs",
   "scripts": {
-    "start": "electron . --no-sandbox --ozone-platform-hint=x11",
+    "start": "electron . --no-sandbox --ozone-platform=x11",
+    "test": "node --test test/*.test.js",
     "icons": "python3 scripts/gen-icons.py"
   },
   "license": "MIT",
@@ -14,6 +15,6 @@
     "ccusage": "^20.0.26"
   },
   "devDependencies": {
-    "electron": "42"
+    "electron": "42.9.3"
   }
 }
